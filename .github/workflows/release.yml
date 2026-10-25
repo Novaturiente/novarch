@@ -15,7 +15,7 @@ jobs:
       - name: Install build tools
         run: pacman -Syu --noconfirm --needed base-devel git rust github-cli
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tag must match the Cargo.toml version
         run: test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
