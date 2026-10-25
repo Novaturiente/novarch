@@ -233,6 +233,10 @@ pub fn input(question: &str, default: &str) -> Result<String, String> {
 
 /// Append one timestamped line to novarch.log. Logging problems never stop a run.
 pub fn log(msg: &str) {
+    // Unit tests must never write to the developer's real state folder.
+    if cfg!(test) {
+        return;
+    }
     let Ok(dir) = config::state_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
         return;

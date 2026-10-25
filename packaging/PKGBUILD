@@ -1,0 +1,24 @@
+# Packages the prebuilt release binary; packaging/build-pkg.sh fills in @VERSION@ and
+# copies `novarch` and `LICENSE` next to this file.
+pkgname=novarch
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Declarative package management for Arch Linux"
+arch=('x86_64')
+url="https://github.com/Novaturiente/novarch"
+license=('GPL-3.0-only')
+depends=('pacman' 'sudo' 'glibc' 'gcc-libs')
+optdepends=('pacman-contrib: pacdiff to merge .pacnew files')
+options=('!debug')
+
+package() {
+	local bin="$startdir/novarch"
+	install -Dm755 "$bin" "$pkgdir/usr/bin/novarch"
+	install -dm755 "$pkgdir/usr/share/bash-completion/completions" \
+		"$pkgdir/usr/share/zsh/site-functions" \
+		"$pkgdir/usr/share/fish/vendor_completions.d"
+	"$bin" completions bash >"$pkgdir/usr/share/bash-completion/completions/novarch"
+	"$bin" completions zsh >"$pkgdir/usr/share/zsh/site-functions/_novarch"
+	"$bin" completions fish >"$pkgdir/usr/share/fish/vendor_completions.d/novarch.fish"
+	install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/novarch/LICENSE"
+}

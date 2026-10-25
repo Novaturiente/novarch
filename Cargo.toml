@@ -1,7 +1,10 @@
 [package]
 name = "novarch"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
+license = "GPL-3.0-only"
+description = "Declarative package management for Arch Linux"
+repository = "https://github.com/Novaturiente/novarch"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

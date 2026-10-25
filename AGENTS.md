@@ -7,9 +7,18 @@ Full design, flows and pitfalls: `docs/design.md`. Read it before changing behav
 
 ## Status
 
-Steps 1-10 done: every command works (sync, diff, upgrade, add, remove, status, list,
-completions). Verified in containers by `tests/container/run.sh`.
-Next milestone: step 11 (release: GitHub Actions workflow, `install.sh`, AUR PKGBUILD).
+Steps 1-11 done except the AUR package: every command works, verified in containers.
+Releases are pacman packages built by `.github/workflows/release.yml` on a `v*` tag and
+installed with `install.sh` (curl). Next: AUR `PKGBUILD` (needs an AUR account).
+
+## Releasing
+
+1. Bump `version` in `Cargo.toml` (must be higher than the installed package, which
+   pacman then upgrades in place), `cargo build` to update `Cargo.lock`.
+2. `tests/container/release.sh` (runs the CI steps and installs via `install.sh` from a
+   local `dist/`).
+3. Commit, `git tag vX.Y.Z`, push the tag. CI checks tag = Cargo version, builds, and
+   publishes the assets `install.sh` downloads (`novarch-x86_64.pkg.tar.zst`, `SHA256SUMS`).
 
 ## Stack
 
