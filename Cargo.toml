@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+# with-dirs: expand ~ during tab completion. History and custom bindings are unused.
+rustyline = { version = "19", default-features = false, features = ["with-dirs"] }
+toml_edit = "0.25"

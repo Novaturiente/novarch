@@ -137,8 +137,8 @@ see what a sync will remove before it happens.
 3. **Parse every file.** Each must be valid TOML with exactly one key, `packages`, an
    array of strings. Unknown keys are errors (catches `pakages = [...]`). Errors name the
    file and line. Any error stops the command; never run with a partial set.
-4. **Validate names** against pacman's rule: only `a-z 0-9 @ . _ + -`, not starting with
-   `-` or `.`. This also stops a name like `--overwrite=*` reaching pacman as an option.
+4. **Validate names** against makepkg's rule: only ASCII letters, digits and `@ . _ + -`,
+   not starting with `-` or `.`. This also stops a name like `--overwrite=*` reaching pacman as an option.
 5. **Declared must be non-empty** after merging. Zero names is an error, not a plan.
 
 ### 4.1 Preflight (every mutating command)

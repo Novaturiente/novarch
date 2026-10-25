@@ -7,8 +7,10 @@ Full design, flows and pitfalls: `docs/design.md`. Read it before changing behav
 
 ## Status
 
-Step 1 (skeleton) done: `novarch --help` works, every command prints "not implemented".
-Next milestone: step 2 of "Build order" in `docs/design.md`.
+Steps 1-2 done: CLI skeleton; `config.rs` (config.toml, first-run folder prompt, host),
+`lists.rs` (load + validate + merge), `ui.rs` (icons, colours, log). `novarch diff`
+prints the declared set; other commands print "not implemented".
+Next milestone: step 3 of "Build order" in `docs/design.md`.
 
 ## Stack
 
@@ -63,6 +65,11 @@ Next milestone: step 2 of "Build order" in `docs/design.md`.
 
 - Check before every commit: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
 - `plan.rs` is pure; its tests are a `#[cfg(test)]` module in the same file (`cargo test`).
+  `lists.rs` has the same kind of module for parsing/validation.
+- Try commands without touching your real config: `XDG_CONFIG_HOME=/tmp/x/cfg
+  XDG_STATE_HOME=/tmp/x/state cargo run -- diff` (also set `HOME` when testing the
+  first-run prompt, whose default folder is under `~`). Drive the prompt in a pty with
+  `script -qec`.
 - Test commands that change the system in a container (`docker run -it --rm archlinux:latest`)
   or a VM, never first on the dev machine. Bootstrap edits `/etc/pacman.conf`.
 
