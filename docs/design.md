@@ -16,7 +16,7 @@ Three sets drive everything:
 
 | Set | Where it comes from | Meaning |
 |---|---|---|
-| **declared** | union of every `packages` array in `~/.config/novarch/packages/*.toml` | what you want installed |
+| **declared** | union of every `packages` array in the packages folder's shared files plus this host's files (section 2) | what you want installed |
 | **managed** | `~/.local/state/novarch/managed.json` | what novarch has taken ownership of |
 | **installed** | `pacman -Qq` / `pacman -T` | what the system actually has |
 
@@ -36,9 +36,10 @@ touch packages installed some other way". Recording what novarch owns gives a cl
 boundary: a package you install by hand with `pacman -S` is never in `managed`, so it is
 never removed.
 
-**Safe failure:** if `managed.json` is deleted or corrupted, `to_remove` is empty.
-Losing state means novarch forgets to remove things, never that it removes the wrong
-things. Write it atomically (write to a temp file in the same directory, then `std::fs::rename`).
+**Safe failure:** if `managed.json` is missing, `to_remove` is empty. Losing state means
+novarch forgets to remove things, never that it removes the wrong things. If it exists
+but does not parse, refuse to run and print its path; never treat it as empty and
+overwrite it. Write it atomically (write to a temp file in the same directory, then `std::fs::rename`).
 
 **Adoption:** listing a package that is already installed makes it managed (decision
 recorded in `AGENTS.md`). If it was installed as a dependency, run
@@ -50,15 +51,33 @@ dependent goes away.
 ## 2. Files on disk
 
 ```
-~/.config/novarch/                 ($XDG_CONFIG_HOME/novarch)
-└── packages/
-    ├── base.toml
-    ├── dev.toml
-    └── added.toml                 default target for `novarch add`
-~/.local/state/novarch/            ($XDG_STATE_HOME/novarch)
+~/.config/novarch/config.toml      ($XDG_CONFIG_HOME/novarch) written by the first-run prompt
+<packages_dir>/                    any folder the user picks, e.g. inside a dotfiles repo
+├── base.toml                      shared: read on every host
+├── dev.toml
+├── manual-installs.toml           default target for `novarch add`
+└── hosts/
+    ├── <host-a>/*.toml            read only on host-a
+    └── <host-b>/*.toml
+~/.local/state/novarch/            ($XDG_STATE_HOME/novarch) per machine, never shared
 ├── managed.json                   sorted list of real package names
 └── novarch.log                    novarch's own log (pacman keeps /var/log/pacman.log)
 ```
+
+`config.toml`:
+
+```toml
+packages_dir = "/home/me/dotfiles/novarch"   # absolute path, ~ expanded when asked
+host = "laptop"        # optional; default is the machine's hostname (gethostname)
+chaotic_aur = true     # answer to the first-run question (section 4.2)
+```
+
+**Hosts:** declared = shared files (top level of `packages_dir`) + `hosts/<host>/*.toml`.
+Nothing is tied to particular machines: any number of hosts, each a folder named after
+its hostname. `host` in `config.toml` overrides the hostname, so two machines can share a
+profile or a machine can use a name other than its hostname. A host with no folder uses
+the shared files only; if `hosts/` exists but has no folder for this host, print a
+warning naming the host (catches a renamed machine).
 
 Package file format, one key only:
 
@@ -72,6 +91,7 @@ packages = [
 ```
 
 - Files are read in sorted order and merged; a name in two files is fine.
+- Only top-level `*.toml` files count (plus `hosts/<host>/*.toml`); other files are ignored.
 - One list for repo and AUR packages: `paru -S` resolves both, so separating them would
   only add bookkeeping. Add an `aur = [...]` key later only if a name exists in both and
   you need to force one source (`paru --aur` / `--repo`).
@@ -87,10 +107,14 @@ packages = [
 | `novarch sync` | Full reconcile: preflight, keyring, upgrade + install in one transaction, adopt, remove unlisted managed packages. |
 | `novarch diff` | Dry run. Prints `to_install`, `to_adopt`, `to_remove`. Changes nothing. |
 | `novarch upgrade` | Keyring refresh + `paru -Syu`. Does not touch the lists. |
-| `novarch add PKG... [--to FILE]` | Installs the packages, then appends them to `added.toml` (or `FILE`) and marks them managed. |
+| `novarch add PKG... [--to FILE] [--no-upgrade]` | Installs the packages, then appends them to `manual-installs.toml` (or `FILE`, relative to `packages_dir`, e.g. `hosts/laptop/dev.toml`) and marks them managed. `--no-upgrade` is the emergency path (section 4.7). |
 | `novarch remove PKG...` | Deletes the names from whichever package files contain them, then runs the removal path for them. Refuses packages that are not managed. |
+| `novarch status` | Lists explicitly installed packages that no file declares, then offers to write them to a new file so novarch manages them (section 4.9). |
+| `novarch list [PKG...]` | Each declared package, the file(s) that declare it, and whether it is installed and managed. With names: only those, plus "not declared" or "dependency of X" (`pacman -Qi` Required By) for names no file lists. |
+| `novarch completions bash\|zsh\|fish` | Prints a shell completion script. |
 
-Global flags: `--yes` (passes `--noconfirm`), `--verbose`.
+Global flags: `--yes` (passes `--noconfirm`), `--verbose`. `sync` and `remove` also take
+`--allow-mass-remove` (section 4.6).
 
 `diff` is not in the original requirements but is the single most useful safety feature:
 see what a sync will remove before it happens.
@@ -99,8 +123,28 @@ see what a sync will remove before it happens.
 
 ## 4. Flows
 
+### 4.0 Config and package lists (every command)
+
+1. **No `config.toml`** (first run): ask for the packages folder with a line editor that
+   tab-completes directories like a shell; suggest `~/.config/novarch/packages`. Offer to
+   create the folder if it does not exist. Save the answer to `config.toml`.
+2. **Check `packages_dir`:** it must exist, be a directory, and contain at least one
+   top-level `*.toml`. If not, explain which check failed and ask again (same prompt).
+   If the folder exists but has no `*.toml`, also offer the import from 4.9: on an
+   existing system that is the normal first step.
+   If stdin is not a terminal, refuse instead of asking. Never continue with a missing
+   or empty folder: an empty declared set would mean "remove every managed package".
+3. **Parse every file.** Each must be valid TOML with exactly one key, `packages`, an
+   array of strings. Unknown keys are errors (catches `pakages = [...]`). Errors name the
+   file and line. Any error stops the command; never run with a partial set.
+4. **Validate names** against pacman's rule: only `a-z 0-9 @ . _ + -`, not starting with
+   `-` or `.`. This also stops a name like `--overwrite=*` reaching pacman as an option.
+5. **Declared must be non-empty** after merging. Zero names is an error, not a plan.
+
 ### 4.1 Preflight (every mutating command)
 
+0. **Interactive only.** Refuse if stdin is not a terminal. There is no unattended mode:
+   AUR PKGBUILDs are code run as you, and removals need a human to read the list.
 1. **Not root.** `libc::geteuid() == 0` → abort. paru refuses to build AUR packages as
    root ("can't install AUR package as root") and so does makepkg. novarch runs as the
    normal user, uses `sudo pacman ...` for repo work, and lets paru call sudo itself.
@@ -113,7 +157,11 @@ see what a sync will remove before it happens.
 
 ### 4.2 Chaotic-AUR setup
 
-Detect: a line matching `^\[chaotic-aur\]` in `/etc/pacman.conf`. If absent:
+Detect: a line matching `^\[chaotic-aur\]` in `/etc/pacman.conf`. If absent and
+`chaotic_aur` is not yet in `config.toml`, ask first: Chaotic-AUR is a third-party repo
+of prebuilt AUR binaries, trusted with root once added. Save the answer.
+`chaotic_aur = false` skips this section for good (paru then comes from the fallback in
+4.3, and AUR packages are built locally). `--yes` answers yes. If accepted:
 
 ```sh
 sudo pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
@@ -171,6 +219,7 @@ paru -Su --needed [--sudoloop] <to_install>  one transaction: upgrade + install
 adopt:   sudo pacman -D --asexplicit <to_adopt that are installed as deps>
 remove:  see 4.6
 save managed.json
+orphans: offer cleanup, see 4.8
 report .pacnew files and reboot hint
 ```
 
@@ -189,38 +238,92 @@ each declared name through `pacman -Qq <name>`.
 Input: `to_remove` (managed but no longer declared), filtered to what is still
 installed (a conflict prompt during install may already have removed some).
 
+**Protected packages** are never removed, only dropped from `managed` with a message:
+`base`, `pacman`, `sudo`, `systemd`, `linux` and `linux-*` (kernels, headers, firmware),
+bootloaders (`grub`, `refind`, `limine`, `efibootmgr`), `paru`, `paru-bin`, `novarch`,
+`novarch-bin`. Deleting `linux` from a list must not uninstall the kernel.
+
+**Confirm before removing.** Print every package with its reason ("managed, no longer
+listed in any file") and ask `[y/N]`, even though pacman asks again. With `--yes`, refuse
+if more than 10 packages would be removed unless `--allow-mass-remove` is also passed.
+
 ```sh
-pacman -Qqt          # installed packages no other package requires
+pacman -Qqtt         # installed packages no other package hard-requires
 ```
 
-- In `to_remove` **and** in `-Qqt` → nothing depends on it → `sudo pacman -Rs <those>`.
-- In `to_remove` but **not** in `-Qqt` → something still hard-depends on it →
+- In `to_remove` **and** in `-Qqtt` → nothing depends on it → `sudo pacman -Rs <those>`.
+- In `to_remove` but **not** in `-Qqtt` → something still hard-depends on it →
   `sudo pacman -D --asdeps <those>` and drop from `managed`. It stays installed, and
   pacman will clean it up naturally when its dependent is removed. Log this clearly.
 
 Why this works for chains: if managed `A` depends on managed `B` and both are unlisted,
-`B` is not in `-Qqt`, so it is marked as a dependency; then `-Rs A` removes `B` too,
+`B` is not in `-Qqtt`, so it is marked as a dependency; then `-Rs A` removes `B` too,
 because `-s` removes dependencies that are "not required by other packages and not
 explicitly installed".
 
 Why `-Rs` and not `-Rns`: `-n` skips saving `.pacsave` backups of edited config files.
 Keeping them costs nothing and saves you from losing config.
 
-Why not the wiki's `pacman -Rns $(pacman -Qdtq)`: that removes **every** orphan on the
-system, including ones novarch never touched. Scope removal to `to_remove`.
+Why not the wiki's `pacman -Rns $(pacman -Qdtq)` here: that removes **every** orphan on
+the system, including ones novarch never touched. Removal of `to_remove` stays scoped;
+system-wide orphans are a separate, opt-in question (4.8).
 
 **Never** pass `-Rc` (cascade) or `-Rdd` (skip dependency checks). Plain `-R` refusing
 with "removing X breaks dependency" is the guard that keeps hard dependencies safe.
 
-Optional dependencies do not count as "required" (`-Qt`, not `-Qtt`), matching the
-requirement "unless it is a hard dependency".
+Optional dependencies do not count as "required": use `-Qtt`, matching the requirement
+"unless it is a hard dependency". (`man pacman`: a single `-t` also hides packages that
+are only *optionally* required; `-tt` includes them. Checked 2026-10-25.)
 
 ### 4.7 add / remove
 
 - `add`: preflight → keyring → `paru -Su --needed <pkgs>` → **only on success**, append to
   the TOML file and to `managed`. Install first so a typo never lands in your config.
+  Default file `manual-installs.toml`; `--to FILE` picks another, relative to
+  `packages_dir`, and must stay inside it.
+- `add --no-upgrade` (emergency install, no full upgrade): preflight → check
+  `pacman -Qu` is empty → `paru -S --needed <pkgs>` (no `-y`, no keyring refresh) → same
+  save step. `pacman -Qu` empty means the local sync database is no newer than the
+  installed system, so installing from it cannot be a partial upgrade. If it is not
+  empty (someone ran `-Sy` without `-u`), refuse and tell the user to run plain `add`.
+  A stale mirror may 404 on a download; that fails cleanly and nothing is saved.
 - `remove`: must be in `managed` (otherwise refuse and say "not managed by novarch; use
   pacman -R"). Delete the name from the TOML file(s), then run 4.6 for just those names.
+
+### 4.8 Orphan cleanup (end of sync, opt-in each time)
+
+After the removal step, compute the safe orphan list:
+
+```sh
+pacman -Qdtq    # installed as a dependency, and nothing needs it, not even optionally
+```
+
+Then drop protected packages (4.6) and anything declared. If the list is empty, say
+nothing. Otherwise print it and ask `Remove N orphaned packages? [y/N]`. Default is no,
+and `--yes` does **not** answer it: this is the only step that touches packages novarch
+does not own, so a human must say yes every time. On yes: `sudo pacman -Rs <list>`
+(never `--noconfirm`, never `-n`, so pacman confirms again and keeps `.pacsave` files).
+
+Why it is safe: single `-t` excludes packages that any installed package requires *or
+optionally* requires, so optional features stay. `-Rs` still refuses anything that would
+break a hard dependency. What it cannot know: a dependency you use directly (a library
+for your own scripts). The prompt is the guard; declare such packages to keep them.
+
+### 4.9 status (bring unlisted packages under novarch)
+
+Unlisted = `pacman -Qqe` (explicitly installed) minus declared. Print them, split into
+repo (`pacman -Qqen`) and foreign/AUR (`pacman -Qqem`). Then ask for a file name
+(default `preinstalled.toml`) and write them there, sorted, with `# repo` and
+`# AUR / foreign` comments. The file must not already exist. The next `sync` adopts them
+(they are installed, so nothing is downloaded). Answering no writes nothing.
+
+### 4.10 Concurrency and state backups
+
+- **One run at a time.** Every mutating command takes `flock(LOCK_EX | LOCK_NB)` on
+  `~/.local/state/novarch/lock` and refuses if another novarch holds it. The kernel
+  drops the lock when the process exits, so it can never go stale.
+- **Backups.** Before each `managed.json` write, rotate the old file to
+  `managed.json.1` … `managed.json.5`. Undoing a bad sync is copying one back by hand.
 
 ---
 
@@ -232,7 +335,7 @@ requirement "unless it is a hard dependency".
   questions (conflicts, provider choice, PKGBUILD review) directly to the user. This
   covers both the "use pacman's progress output" and "allow interaction" requirements
   for free.
-- Capture output only for read-only queries (`pacman -Qq`, `-T`, `-Qqt`, `-Qqo`), with
+- Capture output only for read-only queries (`pacman -Qq`, `-T`, `-Qqtt`, `-Qdtq`, `-Qqe`, `-Qqo`, `-Qu`), with
   `Command::new(..).output()`.
 - Check return codes yourself. pacman exits non-zero when the user answers "n"; treat
   that as "aborted by user", stop, and do **not** update `managed.json`.
@@ -240,12 +343,68 @@ requirement "unless it is a hard dependency".
 - `--yes` maps to `--noconfirm`. With paru this also skips the PKGBUILD review prompt
   (unverified exactly; test it). AUR PKGBUILDs are arbitrary code — keep `--yes` opt-in.
 - Pass `--sudoloop` to paru so sudo doesn't time out during long AUR builds.
+- **Never pipe, prefix or recolour pacman/paru output.** Capturing it (even to tee it
+  into a log) turns stdout into a pipe: pacman then drops progress bars, and prompts
+  without a trailing newline appear late or not at all. A pty wrapper could fix that but
+  is not worth its complexity. pacman already logs every transaction to
+  `/var/log/pacman.log`; novarch's log points there.
+- **Colour for pacman/paru:** pass `--color auto` (or `never`/`always`, from novarch's
+  own `--color`). Stock `/etc/pacman.conf` ships `#Color` commented out, so a fresh
+  install would otherwise be colourless. `auto` only colours a tty (`man pacman`).
+- **Ctrl-C.** The terminal sends SIGINT to novarch and the child together; pacman
+  handles it safely itself. While a child runs, novarch installs a no-op SIGINT handler
+  (not `SIG_IGN`: ignored signals stay ignored across `exec`, so the child would become
+  unkillable). Afterwards print `✗ interrupted, nothing saved` and exit 130.
 
-**novarch's own messages:** plain `eprintln!` with a pacman-like prefix
-(`:: novarch: resolving package lists...`); add colour later only if it helps. Log by
-appending lines to `~/.local/state/novarch/novarch.log` (`std::fs::OpenOptions`, append
-mode); no logging crate. Log every command novarch runs (the full argv)
-and every plan (install/adopt/remove sets) so a bad sync can be reconstructed.
+### 5.1 What the user sees
+
+novarch's own lines go to stderr, each with an icon and a colour:
+
+| Icon | ASCII | Colour | Meaning |
+|---|---|---|---|
+| `::` | `::` | bold blue | phase header |
+| `➜` | `>` | dim | command about to run |
+| `✓` | `ok` | green | step succeeded |
+| `⚠` | `!` | yellow | warning, needs attention later |
+| `✗` | `x` | bold red | error, novarch stops |
+| `?` | `?` | bold cyan | novarch's own question |
+| `+` `~` `-` | same | green, blue, red | install, adopt, remove |
+
+- **Phases are numbered:** `:: [3/7] Upgrading system and installing 4 packages`.
+  The user always knows where the run is and how much is left.
+- **Announce before handing over the terminal.** Print the full command dimmed
+  (`➜ sudo pacman -Sy --needed archlinux-keyring`) and, before the first sudo call,
+  `sudo may ask for your password`. Silence while sudo waits is what feels "stuck".
+  After the child exits: `✓ done in 42s`, or `✗ pacman exited with code 1`.
+- **AUR builds:** before paru starts, say how many packages it will build from source
+  and that this can take minutes; paru's own build output then streams live.
+- **Plan before acting:** `sync`, `add` and `remove` print the plan (`+`, `~`, `-`
+  lines, with the file that declares each package) and counts, then ask
+  `? Proceed? [Y/n]`. `diff` prints the same plan and stops.
+- **Summary at the end:** counts installed/adopted/removed/orphans removed, total time,
+  `.pacnew` files, reboot hint, and the log path. One screen, readable after the
+  pacman scrollback.
+- **Errors say what to do next.** novarch only sees exit codes (output is not captured),
+  so hints are per phase: keyring phase failed → "check network, then run
+  `novarch upgrade`"; install failed → "nothing was saved; scroll up for pacman's
+  error"; lock held → the lock message from 4.1.
+- **Quiet queries, visible waits.** Read-only queries are fast and silent; any phase
+  that waits on the network (keyring refresh) gets a header first.
+- **Colour rules:** `--color auto|always|never` (global), default `auto` = colour only
+  when stderr is a tty. `NO_COLOR` set (any value) means `never`. Plain ANSI escape
+  codes, no crate.
+- **Icon fallback:** use the ASCII column when `TERM=linux` (the Linux console of a fresh
+  install cannot draw `✓` or `➜`) or the locale is not UTF-8 (`LANG`/`LC_ALL`).
+- `--verbose` also prints each read-only query as a `➜` line.
+
+### 5.2 Log file
+
+`~/.local/state/novarch/novarch.log`, appended (`std::fs::OpenOptions`), no colours or
+icons, no logging crate. One line per event with a local timestamp
+(`libc::localtime_r`) and the run's pid: each full argv, its exit code and duration,
+every plan (install/adopt/remove sets), every answer to a novarch question, and the
+final summary. A bad sync can be reconstructed from this file plus
+`/var/log/pacman.log`. Rotate to `novarch.log.1` when it passes 1 MiB.
 
 ---
 
@@ -255,7 +414,7 @@ and every plan (install/adopt/remove sets) so a bad sync can be reconstructed.
 |---|---|
 | **Package groups** (`xorg`, `gnome`) | A group name is not a package, so `pacman -T` reports it missing forever. Expand at load time with `pacman -Sgq <name>` and treat members as declared. (`base-devel` is a meta *package* now, not a group, so it just works.) |
 | **Provides / virtual names** (`sh` → `bash`, `neovim` satisfied by `neovim-git`) | Check with `pacman -T`, record real names via `pacman -Qq <name>`. |
-| **Typos / nonexistent names** | paru fails the whole transaction with "target not found". Fine for v1: nothing changes, error names the package. |
+| **Typos / nonexistent names** | Bad characters are caught at load (4.0). Names that are valid but don't exist: paru fails the whole transaction with "target not found"; nothing changes, the error names the package. |
 | **`-git` variants and conflicts** | pacman asks "X and Y are in conflict. Remove Y?" interactively. Install before removing, and re-check installed state before removal. |
 | **IgnorePkg** in pacman.conf | `-Su` skips them; respect it, don't try to override. |
 | **`.pacnew` files** | After a sync, list `/etc/**/*.pacnew` (or suggest `pacdiff` from `pacman-contrib`). Report only, never merge. |
@@ -275,6 +434,8 @@ novarch/
 ├── docs/design.md             this file
 └── src/
     ├── main.rs                clap CLI, one function per command
+    ├── config.rs              config.toml, first-run prompt, host name
+    ├── ui.rs                  icons, colours, phases, prompts, log file (section 5)
     ├── lists.rs               load/merge/append TOML package files (toml_edit)
     ├── state.rs               managed.json load/save (atomic)
     ├── plan.rs                pure: (declared, installed, managed) -> Plan; #[cfg(test)] tests
@@ -293,7 +454,9 @@ and is tested by running it.
 | `clap` (derive) | CLI parsing |
 | `toml_edit` | read + append package files, keeping comments |
 | `serde_json` | `managed.json` |
-| `libc` | `geteuid()` for the root check |
+| `libc` | `geteuid()`, `gethostname()`, `isatty()`, `flock()`, `localtime_r()`, SIGINT handler |
+| `rustyline` | first-run folder prompt with directory tab completion |
+| `clap_complete` | `novarch completions` |
 | `tempfile` | paru-bin build directory (bootstrap fallback) |
 
 Development needs only `rustup`/`cargo`: `cargo build`, `cargo test`,
@@ -319,16 +482,21 @@ daily system until `diff` output looks right.
 Each milestone is usable on its own.
 
 1. **Skeleton:** `Cargo.toml`, `main.rs` with clap, `novarch --help` works.
-2. **Read lists:** `lists.rs` loads and merges `packages/*.toml`. `novarch diff` prints the declared set.
-3. **Query system:** `system.rs` wraps `pacman -T`, `-Qq`, `-Qqt`. `diff` shows `to_install`.
+2. **Config + lists:** first-run prompt and `config.toml` (`config.rs`); `lists.rs` loads,
+   validates (4.0) and merges shared + host files. `novarch diff` prints the declared set.
+3. **Query system:** `system.rs` wraps `pacman -T`, `-Qq`, `-Qqtt`. `diff` shows `to_install`.
 4. **State + plan:** `state.rs`, `plan.rs` with its tests. `diff` shows all three sets.
 5. **Preflight:** root check, lock check.
-6. **Install path:** keyring refresh + `paru -Su --needed`, save state. `novarch sync` installs.
-7. **Removal path:** section 4.6. `sync` is now complete.
-8. **upgrade, add, remove** commands (small once 6 and 7 exist).
+6. **Install path:** keyring refresh + `paru -Su --needed`, save state with lock and
+   backups (4.10). `novarch sync` installs.
+7. **Removal path:** sections 4.6 and 4.8. `sync` is now complete.
+8. **upgrade, add, remove, status, list** commands (small once 6 and 7 exist).
 9. **Bootstrap:** chaotic-aur + paru (test in a container — it edits `/etc/pacman.conf`).
-10. **Polish:** group expansion, `.pacnew` report, reboot hint, file logging.
+10. **Polish:** group expansion, `.pacnew` report, reboot hint, shell completions.
 11. **Release:** GitHub Actions release workflow, `install.sh`, AUR `PKGBUILD` (section 7).
+
+The output style (5.1) and log file (5.2) are built in step 2 as a small `ui.rs`, so
+every later step uses them from the start.
 
 ---
 
@@ -336,13 +504,11 @@ Each milestone is usable on its own.
 
 | Skipped | Add when |
 |---|---|
-| `novarch import` (bootstrap lists from `pacman -Qqe`) | You set up on an existing machine and don't want to type the lists. |
-| Per-host files (`hosts/<hostname>.toml`) | You use the same config on two machines. |
-| Pre/post hooks, systemd service enabling, dotfiles | Never, probably — out of scope for a package manager. |
+| Pre/post hooks, systemd service enabling, dotfiles | Never: novarch manages packages only (decided). |
+| Unattended mode (timers, cron, non-terminal runs) | Never (decided); see 4.1 step 0. |
 | Btrfs snapshot before sync | You don't use snapper + `snap-pac`, which already snapshots every pacman transaction. |
 | Separate `aur = [...]` key | A name exists in both repo and AUR and you need to pick. |
-| Name validation before install | paru's "target not found" is annoying enough to matter. |
-| A config file (`config.toml`) | There is a second setting worth having. |
+| Checking names exist before install (`pacman -Si` / AUR RPC) | paru's "target not found" is annoying enough to matter. |
 
 ---
 

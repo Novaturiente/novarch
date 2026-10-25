@@ -1,7 +1,7 @@
 # AGENTS.md
 
 novarch: a Rust CLI that manages Arch Linux packages declaratively. Package names live
-in TOML files under `~/.config/novarch/packages/`; `novarch sync` installs them via
+in TOML files in a user-chosen packages folder (shared files + `hosts/<host>/`); `novarch sync` installs them via
 pacman/paru and removes packages that novarch manages but that are no longer listed.
 Full design, flows and pitfalls: `docs/design.md`. Read it before changing behavior.
 
@@ -25,7 +25,12 @@ Next milestone: step 2 of "Build order" in `docs/design.md`.
   way are never touched.
 - **Adoption.** A listed package that is already installed becomes managed.
 - **One `packages = [...]` list** per TOML file for repo and AUR alike; paru resolves both.
-- **Chaotic-AUR is set up automatically** if missing; paru is installed from it.
+- **Chaotic-AUR is offered, not forced:** asked once, answer saved in `config.toml`;
+  paru comes from it, or from the paru-bin fallback when declined.
+- **Packages only.** No services, dotfiles or hooks. **No unattended mode.**
+- **Hosts are generic:** any number of `hosts/<name>/` folders; never special-case
+  particular machines.
+- `add --no-upgrade` is the emergency path; default target file `manual-installs.toml`.
 
 ## Invariants (breaking these can damage a user's system)
 
@@ -33,11 +38,25 @@ Next milestone: step 2 of "Build order" in `docs/design.md`.
 - Never `-Sy` without `-u` in the same run. Installs go in the same `paru -Su --needed`
   transaction as the upgrade.
 - Never pass `-Rc`, `-Rdd`, or `--nodeps` to removals. Use `-Rs`, scoped to `to_remove` only.
-  Never run a system-wide orphan cleanup.
+- System-wide orphan cleanup only as the end-of-sync prompt (`docs/design.md` 4.8):
+  `pacman -Qdtq` (single `-t`) minus protected and declared, default No, never answered
+  by `--yes`, never `--noconfirm`.
+- Mutating commands hold `flock` on `~/.local/state/novarch/lock`; rotate
+  `managed.json` backups (`.1`..`.5`) before every write.
 - Never delete `/var/lib/pacman/db.lck` automatically.
-- Mutating pacman/paru calls inherit the terminal (no output capture) so prompts and
-  progress bars reach the user. `--noconfirm` only when the user passes `--yes`.
+- Mutating pacman/paru calls inherit the terminal (no output capture, no prefixing, no
+  tee) so prompts and progress bars reach the user. Icons/colours apply to novarch's
+  own lines only (`docs/design.md` 5.1). `--noconfirm` only when the user passes `--yes`.
+- While a child runs, SIGINT gets a no-op handler, never `SIG_IGN` (it would survive
+  `exec` and make pacman unkillable).
 - Update `managed.json` only after the pacman/paru call succeeded; write it atomically.
+  A `managed.json` that fails to parse stops the run; never overwrite it as empty.
+- Refuse to run with a missing/empty packages folder or zero declared packages.
+  Any file that fails to parse stops the command.
+- Mutating commands refuse when stdin is not a terminal.
+- Protected packages (`docs/design.md` 4.6) are never removed. Removals are confirmed
+  first; `--yes` removing >10 needs `--allow-mass-remove`.
+- `--no-upgrade` installs only when `pacman -Qu` is empty (no partial upgrade).
 - `add` installs first, then writes the TOML file.
 
 ## Testing
