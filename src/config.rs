@@ -20,6 +20,30 @@ const DEFAULT_PACKAGES_DIR: &str = "~/.config/novarch/packages";
 pub struct Config {
     pub packages_dir: PathBuf,
     pub host: String,
+    /// Answer to the Chaotic-AUR question; `None` = not asked yet.
+    pub chaotic_aur: Option<bool>,
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("config.toml"))
+}
+
+fn read_doc(path: &Path) -> Result<DocumentMut, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => text
+            .parse::<DocumentMut>()
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Save the Chaotic-AUR answer, keeping the rest of config.toml (and its comments).
+pub fn set_chaotic(answer: bool) -> Result<(), String> {
+    let path = config_path()?;
+    let mut doc = read_doc(&path)?;
+    doc["chaotic_aur"] = value(answer);
+    write_atomic(&path, &doc.to_string())
 }
 
 fn home() -> Result<PathBuf, String> {
@@ -48,14 +72,8 @@ pub fn state_dir() -> Result<PathBuf, String> {
 /// Load config.toml. If the packages folder is unset or unusable, ask for one (terminal
 /// only) until it is usable, then save it.
 pub fn load() -> Result<Config, String> {
-    let path = config_dir()?.join("config.toml");
-    let mut doc = match fs::read_to_string(&path) {
-        Ok(text) => text
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("{}: {e}", path.display()))?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
+    let path = config_path()?;
+    let mut doc = read_doc(&path)?;
     for (key, item) in doc.iter() {
         let ok = match key {
             "packages_dir" | "host" => item.is_str(),
@@ -77,7 +95,14 @@ pub fn load() -> Result<Config, String> {
             None => ui::phase("First run: choose the folder that holds your package lists"),
             Some(d) => match check_packages_dir(d) {
                 Ok(()) => break,
-                Err(why) => ui::warn(&why),
+                Err(why) => {
+                    ui::warn(&why);
+                    // An existing folder without package files: on an existing system the
+                    // natural first step is importing what is installed (design 4.9).
+                    if d.is_dir() && io::stdin().is_terminal() && offer_import(d)? {
+                        continue;
+                    }
+                }
             },
         }
         if !io::stdin().is_terminal() {
@@ -110,7 +135,29 @@ pub fn load() -> Result<Config, String> {
     Ok(Config {
         packages_dir: dir,
         host,
+        chaotic_aur: doc.get("chaotic_aur").and_then(|i| i.as_bool()),
     })
+}
+
+fn offer_import(dir: &Path) -> Result<bool, String> {
+    let explicit = crate::system::explicit()?;
+    if explicit.is_empty() {
+        return Ok(false);
+    }
+    let question = format!(
+        "Import the {} packages you installed explicitly into preinstalled.toml?",
+        explicit.len()
+    );
+    if !ui::confirm(&question, true)? {
+        return Ok(false);
+    }
+    let file = dir.join("preinstalled.toml");
+    crate::lists::write_import(&file, &explicit, &crate::system::foreign()?)?;
+    ui::ok(&format!(
+        "Wrote {}; review it, then run novarch diff",
+        file.display()
+    ));
+    Ok(true)
 }
 
 /// The folder must exist and hold at least one top-level `*.toml` (design 4.0 step 2).

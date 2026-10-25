@@ -4,13 +4,21 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::config;
 
 struct Style {
     color: bool,
     unicode: bool,
+    verbose: bool,
+    /// Passed to pacman/paru as `--color`.
+    color_arg: &'static str,
 }
+
+static STEP: AtomicUsize = AtomicUsize::new(0);
+static STEPS: AtomicUsize = AtomicUsize::new(0);
 
 static STYLE: OnceLock<Style> = OnceLock::new();
 
@@ -19,6 +27,7 @@ const LOG_MAX_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Copy)]
 enum Kind {
     Phase,
+    Cmd,
     Ok,
     Warn,
     Error,
@@ -30,6 +39,7 @@ impl Kind {
     fn look(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Kind::Phase => ("::", "::", "1;34"),
+            Kind::Cmd => ("➜", ">", "2"),
             Kind::Ok => ("✓", "ok", "32"),
             Kind::Warn => ("⚠", "!", "33"),
             Kind::Error => ("✗", "x", "1;31"),
@@ -39,17 +49,31 @@ impl Kind {
 }
 
 /// `color` is the value of `--color`: "auto", "always" or "never".
-pub fn init(color: &str) {
-    let color = std::env::var_os("NO_COLOR").is_none()
-        && match color {
+pub fn init(color: &str, verbose: bool) {
+    let color_arg = match color {
+        _ if std::env::var_os("NO_COLOR").is_some() => "never",
+        "always" => "always",
+        "never" => "never",
+        _ => "auto",
+    };
+    let _ = STYLE.set(Style {
+        color: match color_arg {
             "always" => true,
             "never" => false,
             _ => io::stderr().is_terminal(),
-        };
-    let _ = STYLE.set(Style {
-        color,
+        },
         unicode: unicode_ok(),
+        verbose,
+        color_arg,
     });
+}
+
+pub fn verbose() -> bool {
+    style().verbose
+}
+
+pub fn color_arg() -> &'static str {
+    style().color_arg
 }
 
 /// The Linux console of a fresh install cannot draw ✓ or ➜; neither can a non-UTF-8 locale.
@@ -69,10 +93,12 @@ fn style() -> &'static Style {
     STYLE.get_or_init(|| Style {
         color: false,
         unicode: false,
+        verbose: false,
+        color_arg: "never",
     })
 }
 
-fn paint(code: &str, text: &str) -> String {
+pub fn paint(code: &str, text: &str) -> String {
     if style().color {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
@@ -88,6 +114,7 @@ fn icon(kind: Kind) -> String {
 fn emit(kind: Kind, msg: &str) {
     let text = match kind {
         Kind::Phase => paint("1", msg),
+        Kind::Cmd => paint("2", msg),
         _ => msg.to_string(),
     };
     eprintln!("{} {text}", icon(kind));
@@ -96,6 +123,35 @@ fn emit(kind: Kind, msg: &str) {
 
 pub fn phase(msg: &str) {
     emit(Kind::Phase, msg);
+}
+
+pub fn cmd(msg: &str) {
+    emit(Kind::Cmd, msg);
+}
+
+/// Number the phases of one command: `set_steps(5)` then `step(..)` prints `[1/5] ..`.
+pub fn set_steps(total: usize) {
+    STEPS.store(total, Ordering::SeqCst);
+    STEP.store(0, Ordering::SeqCst);
+}
+
+pub fn step(msg: &str) {
+    let total = STEPS.load(Ordering::SeqCst);
+    let n = STEP.fetch_add(1, Ordering::SeqCst) + 1;
+    if total > 0 && n <= total {
+        phase(&format!("[{n}/{total}] {msg}"));
+    } else {
+        phase(msg);
+    }
+}
+
+pub fn duration(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0 => format!("{}ms", d.as_millis()),
+        1..60 => format!("{s}s"),
+        _ => format!("{}m {}s", s / 60, s % 60),
+    }
 }
 
 pub fn ok(msg: &str) {
@@ -152,6 +208,27 @@ pub fn confirm(question: &str, default_yes: bool) -> Result<bool, String> {
         ));
         return Ok(answer);
     }
+}
+
+/// Read one line; empty input returns `default`.
+pub fn input(question: &str, default: &str) -> Result<String, String> {
+    eprint!("{} {question} [{default}] ", icon(Kind::Ask));
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    if io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("no answer: input closed".into());
+    }
+    let answer = match line.trim() {
+        "" => default.to_string(),
+        a => a.to_string(),
+    };
+    log(&format!("? {question} -> {answer}"));
+    Ok(answer)
 }
 
 /// Append one timestamped line to novarch.log. Logging problems never stop a run.

@@ -7,10 +7,9 @@ Full design, flows and pitfalls: `docs/design.md`. Read it before changing behav
 
 ## Status
 
-Steps 1-2 done: CLI skeleton; `config.rs` (config.toml, first-run folder prompt, host),
-`lists.rs` (load + validate + merge), `ui.rs` (icons, colours, log). `novarch diff`
-prints the declared set; other commands print "not implemented".
-Next milestone: step 3 of "Build order" in `docs/design.md`.
+Steps 1-10 done: every command works (sync, diff, upgrade, add, remove, status, list,
+completions). Verified in containers by `tests/container/run.sh`.
+Next milestone: step 11 (release: GitHub Actions workflow, `install.sh`, AUR PKGBUILD).
 
 ## Stack
 
@@ -59,6 +58,8 @@ Next milestone: step 3 of "Build order" in `docs/design.md`.
 - Protected packages (`docs/design.md` 4.6) are never removed. Removals are confirmed
   first; `--yes` removing >10 needs `--allow-mass-remove`.
 - `--no-upgrade` installs only when `pacman -Qu` is empty (no partial upgrade).
+- Source builds (target in no sync repo) add `base-devel` to the same `paru -Su`
+  transaction if missing; paru alone cannot build without it.
 - `add` installs first, then writes the TOML file.
 
 ## Testing
@@ -70,8 +71,12 @@ Next milestone: step 3 of "Build order" in `docs/design.md`.
   XDG_STATE_HOME=/tmp/x/state cargo run -- diff` (also set `HOME` when testing the
   first-run prompt, whose default folder is under `~`). Drive the prompt in a pty with
   `script -qec`.
-- Test commands that change the system in a container (`docker run -it --rm archlinux:latest`)
-  or a VM, never first on the dev machine. Bootstrap edits `/etc/pacman.conf`.
+- Commands that change the system are tested only in containers:
+  `tests/container/run.sh [chaotic|fallback|all]` (docker, network; ~10 min). It builds the
+  release binary, runs `cases.sh` as a sudo user inside `archlinux:latest` (`--rm`), and
+  keeps each novarch run's output in `target/container-results/<mode>/`. Never run
+  sync/upgrade/add/remove on the dev machine. On the host only read-only `diff`, `list`,
+  `status` with temporary `XDG_*` folders.
 
 ## Keeping this file current
 

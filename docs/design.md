@@ -152,8 +152,9 @@ see what a sync will remove before it happens.
    process, abort with a clear message. If the lock exists with no pacman running, tell
    the user it is probably stale and how to remove it. **Never delete the lock
    automatically.**
-3. **Chaotic-AUR** (see 4.2), then **paru** (see 4.3). Chaotic first, because it makes
-   installing paru a plain `pacman -S`.
+3. **Chaotic-AUR** (see 4.2), then the keyring refresh (4.4), then **paru** (see 4.3).
+   Chaotic first, so the refresh's `-Sy` picks it up; paru right after, because its
+   install is the `-Su` that must follow that `-Sy`.
 
 ### 4.2 Chaotic-AUR setup
 
@@ -183,16 +184,25 @@ step of every flow is a `-Sy`, which picks the new repo up.
 
 ### 4.3 paru bootstrap
 
-`paru` found in any `$PATH` entry (`std::env::split_paths`) → done. Otherwise:
+`paru` found in any `$PATH` entry (`std::env::split_paths`) → done. Otherwise, right
+after the keyring refresh's `-Sy` (so these `-Su` calls complete it, no partial upgrade):
 
-1. **With chaotic-aur** (normal case): `sudo pacman -S --needed paru`.
-2. **Fallback** (chaotic setup failed or user disabled it later):
+1. **With chaotic-aur** (normal case): `sudo pacman -Su --needed paru`.
+2. **Fallback** (chaotic declined):
    ```sh
-   sudo pacman -S --needed base-devel git        # base-devel does not include git
-   git clone https://aur.archlinux.org/paru-bin.git <tmpdir>
-   cd <tmpdir> && makepkg -si
+   sudo pacman -Su --needed base-devel git       # base-devel does not include git
+   git clone --depth=1 https://aur.archlinux.org/paru-bin.git <tmpdir>
+   cd <tmpdir> && makepkg -si --needed
    ```
-   `paru-bin` skips a long Rust compile. Use `tempfile::TempDir` (deleted on drop).
+   `paru-bin` skips a long Rust compile. `<tmpdir>` is `$TMPDIR/novarch-paru-bin-<pid>`,
+   deleted afterwards. **Verify it starts** (`paru --version`): `paru-bin` can lag behind
+   pacman's libalpm soname (seen 2026-10-25: built for `libalpm.so.15`, pacman 7.1 ships
+   `.so.16`). If it fails, `sudo pacman -R paru-bin` (just installed, nothing depends on
+   it) and build `paru` from source the same way (`makepkg -sir`), which always matches.
+
+**Source builds need base-devel.** paru does not depend on it. When `sync`/`add` will
+build packages that are in no sync repo and `base-devel` is not installed, it is added
+to the same `paru -Su` transaction.
 
 ### 4.4 Keyring refresh
 
@@ -412,7 +422,7 @@ final summary. A bad sync can be reconstructed from this file plus
 
 | Pitfall | Handling |
 |---|---|
-| **Package groups** (`xorg`, `gnome`) | A group name is not a package, so `pacman -T` reports it missing forever. Expand at load time with `pacman -Sgq <name>` and treat members as declared. (`base-devel` is a meta *package* now, not a group, so it just works.) |
+| **Package groups** (`xorg`, `gnome`) | A group name is not a package, so `pacman -T` reports it missing forever. Expand at load time with one `pacman -Sg <all names>` call and treat members as declared (a name that is also a sync package stays a package). (`base-devel` is a meta *package* now, not a group, so it just works.) |
 | **Provides / virtual names** (`sh` → `bash`, `neovim` satisfied by `neovim-git`) | Check with `pacman -T`, record real names via `pacman -Qq <name>`. |
 | **Typos / nonexistent names** | Bad characters are caught at load (4.0). Names that are valid but don't exist: paru fails the whole transaction with "target not found"; nothing changes, the error names the package. |
 | **`-git` variants and conflicts** | pacman asks "X and Y are in conflict. Remove Y?" interactively. Install before removing, and re-check installed state before removal. |
@@ -457,7 +467,6 @@ and is tested by running it.
 | `libc` | `geteuid()`, `gethostname()`, `isatty()`, `flock()`, `localtime_r()`, SIGINT handler |
 | `rustyline` | first-run folder prompt with directory tab completion |
 | `clap_complete` | `novarch completions` |
-| `tempfile` | paru-bin build directory (bootstrap fallback) |
 
 Development needs only `rustup`/`cargo`: `cargo build`, `cargo test`,
 `cargo run -- diff`.
