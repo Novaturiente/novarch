@@ -188,18 +188,64 @@ pub fn required_by(name: &str) -> Result<Vec<String>, String> {
     })
 }
 
-/// One display line per sync-repo package (`pacman -Sl`) and AUR package (`paru -Sl aur`,
-/// names only): `name repo version [installed]`, name first so fzf's `{1}` is the name.
-pub fn package_index() -> Result<String, String> {
-    let repo = capture("pacman", &["-Sl"])?;
-    if repo.code != 0 {
-        return Err(failed("pacman", &["-Sl"], &repo));
+/// One search row: name, repo, version, installed mark, description.
+type Row = [String; 5];
+
+/// `pacman -Ss` with no term (every sync package, description on the next line):
+/// `repo/name version (groups) [installed]` / `    description`.
+fn parse_ss(text: &str) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(char::is_whitespace) {
+            if let Some(row) = rows.last_mut() {
+                row[4] = line.trim().to_string();
+            }
+            continue;
+        }
+        let mut f = line.split_whitespace();
+        let (Some(id), Some(version)) = (f.next(), f.next()) else {
+            continue;
+        };
+        let Some((repo, name)) = id.split_once('/') else {
+            continue;
+        };
+        let rest: Vec<&str> = f.collect();
+        let mark = rest
+            .iter()
+            .position(|t| t.starts_with('['))
+            .map(|i| rest[i..].join(" "))
+            .unwrap_or_default();
+        rows.push([name, repo, version, &mark, ""].map(String::from));
     }
-    let mut text = repo.stdout;
+    rows
+}
+
+/// `paru -Sl aur`: `aur name unknown-version [installed]`, no descriptions.
+fn parse_sl(text: &str) -> Vec<Row> {
+    text.lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let (repo, name) = (f.next()?, f.next()?);
+            let version = f.next().filter(|v| *v != "unknown-version").unwrap_or("");
+            let mark = f.collect::<Vec<_>>().join(" ");
+            Some([name, repo, version, &mark, ""].map(String::from))
+        })
+        .collect()
+}
+
+/// One fzf line per sync-repo package (with description) and AUR package (name only),
+/// tab-separated: name, repo, version + mark, description. The caller searches fields 1
+/// and 4 only (`--nth 1,4`); `{1}` is the name, `{2}` the repo.
+pub fn package_index() -> Result<String, String> {
+    let repo = capture("pacman", &["-Ss"])?;
+    if repo.code != 0 {
+        return Err(failed("pacman", &["-Ss"], &repo));
+    }
+    let mut rows = parse_ss(&repo.stdout);
     if in_path("paru") {
         let aur = capture("paru", &["-Sl", "aur"])?;
         if aur.code == 0 {
-            text.push_str(&aur.stdout);
+            rows.extend(parse_sl(&aur.stdout));
         } else {
             ui::warn(&failed("paru", &["-Sl", "aur"], &aur));
             ui::warn("showing repo packages only");
@@ -207,27 +253,15 @@ pub fn package_index() -> Result<String, String> {
     } else {
         ui::warn("paru is not installed: showing repo packages only");
     }
-    let mut out = String::with_capacity(text.len() * 2);
-    for line in text.lines() {
-        let mut f = line.split_whitespace();
-        let (Some(repo), Some(name)) = (f.next(), f.next()) else {
-            continue;
-        };
-        let version = f.next().unwrap_or("");
-        let version = if version == "unknown-version" {
-            ""
-        } else {
-            version
-        };
-        let mark = f.collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for [name, repo, version, mark, desc] in rows {
+        let colour = if repo == "aur" { "35" } else { "34" };
         out.push_str(&format!(
-            "{name:<36} {} {} {}\n",
-            ui::paint(
-                if repo == "aur" { "35" } else { "34" },
-                &format!("{repo:<16}")
-            ),
-            ui::dim(version),
-            ui::paint("32", &mark)
+            "{name:<36}\t{}\t{} {}\t{}\n",
+            ui::paint(colour, &format!("{repo:<16}")),
+            ui::dim(&format!("{version:<14}")),
+            ui::paint("32", &mark),
+            ui::dim(&desc)
         ));
     }
     Ok(out)
@@ -414,4 +448,29 @@ pub fn paru(args: &[&str], noconfirm: bool) -> Result<(), String> {
         a.push("--noconfirm".into());
     }
     exec("paru", &a, None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pacman_ss() {
+        let text = "core/bash 5.3-1 [installed]\n    The GNU shell\ncore/base-devel 1-2 (base-devel) [installed: 1-1]\n    Basic tools\nextra/zsh 5.9-5\n    A shell\n";
+        let rows = parse_ss(text);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0],
+            ["bash", "core", "5.3-1", "[installed]", "The GNU shell"]
+        );
+        assert_eq!(rows[1][3], "[installed: 1-1]");
+        assert_eq!(rows[2], ["zsh", "extra", "5.9-5", "", "A shell"]);
+    }
+
+    #[test]
+    fn parses_paru_sl_aur() {
+        let rows = parse_sl("aur foo unknown-version\naur bar unknown-version [installed]\n");
+        assert_eq!(rows[0], ["foo", "aur", "", "", ""]);
+        assert_eq!(rows[1][3], "[installed]");
+    }
 }

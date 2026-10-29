@@ -1082,7 +1082,13 @@ fn search(words: Vec<String>, to: Option<String>, yes: bool) -> Result<(), Strin
     let preview = "pacman -Si --color always {2}/{1} 2>/dev/null || paru -Si --color always {1}";
     let query = words.join(" ");
     let mut opts = vec![
-        "--no-sort",
+        // Match the name and description only, not repo, version or the installed mark.
+        "--delimiter",
+        "\t",
+        "--nth",
+        "1,4",
+        "--tabstop",
+        "1",
         "--prompt",
         "package> ",
         "--header",
