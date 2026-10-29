@@ -234,7 +234,7 @@ fn parse_sl(text: &str) -> Vec<Row> {
 }
 
 /// One fzf line per sync-repo package (with description) and AUR package (name only),
-/// tab-separated: name, repo, version + mark, description. The caller searches fields 1
+/// tab-separated: name, repo, installed mark, description. The caller searches fields 1
 /// and 4 only (`--nth 1,4`); `{1}` is the name, `{2}` the repo.
 pub fn package_index() -> Result<String, String> {
     let repo = capture("pacman", &["-Ss"])?;
@@ -254,13 +254,14 @@ pub fn package_index() -> Result<String, String> {
         ui::warn("paru is not installed: showing repo packages only");
     }
     let mut out = String::new();
-    for [name, repo, version, mark, desc] in rows {
+    // No version column: the list pane is narrow and the preview shows it.
+    for [name, repo, _, mark, desc] in rows {
         let colour = if repo == "aur" { "35" } else { "34" };
+        let mark = if mark.is_empty() { "" } else { "[installed]" };
         out.push_str(&format!(
-            "{name:<36}\t{}\t{} {}\t{}\n",
+            "{name:<30}\t{}\t{}\t{}\n",
             ui::paint(colour, &format!("{repo:<16}")),
-            ui::dim(&format!("{version:<14}")),
-            ui::paint("32", &mark),
+            ui::paint("32", &format!("{mark:<11}")),
             ui::dim(&desc)
         ));
     }
@@ -315,7 +316,7 @@ pub fn fzf_pick(lines: &str, opts: &[&str]) -> Result<Vec<String>, String> {
             "--layout",
             "reverse",
             "--preview-window",
-            "right,55%,wrap",
+            "right,45%,wrap",
         ])
         .args(opts)
         .stdin(Stdio::piped())

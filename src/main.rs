@@ -1089,6 +1089,11 @@ fn search(words: Vec<String>, to: Option<String>, yes: bool) -> Result<(), Strin
         "1,4",
         "--tabstop",
         "1",
+        // Fuzzy matching across long descriptions hits scattered letters ("f..o..r");
+        // exact substrings, like pacman -Ss. A leading ' makes one term fuzzy again.
+        "--exact",
+        // Keep the name column visible when the match is far right in the description.
+        "--no-hscroll",
         "--prompt",
         "package> ",
         "--header",
