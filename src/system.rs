@@ -188,6 +188,125 @@ pub fn required_by(name: &str) -> Result<Vec<String>, String> {
     })
 }
 
+/// One display line per sync-repo package (`pacman -Sl`) and AUR package (`paru -Sl aur`,
+/// names only): `name repo version [installed]`, name first so fzf's `{1}` is the name.
+pub fn package_index() -> Result<String, String> {
+    let repo = capture("pacman", &["-Sl"])?;
+    if repo.code != 0 {
+        return Err(failed("pacman", &["-Sl"], &repo));
+    }
+    let mut text = repo.stdout;
+    if in_path("paru") {
+        let aur = capture("paru", &["-Sl", "aur"])?;
+        if aur.code == 0 {
+            text.push_str(&aur.stdout);
+        } else {
+            ui::warn(&failed("paru", &["-Sl", "aur"], &aur));
+            ui::warn("showing repo packages only");
+        }
+    } else {
+        ui::warn("paru is not installed: showing repo packages only");
+    }
+    let mut out = String::with_capacity(text.len() * 2);
+    for line in text.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(repo), Some(name)) = (f.next(), f.next()) else {
+            continue;
+        };
+        let version = f.next().unwrap_or("");
+        let version = if version == "unknown-version" {
+            ""
+        } else {
+            version
+        };
+        let mark = f.collect::<Vec<_>>().join(" ");
+        out.push_str(&format!(
+            "{name:<36} {} {} {}\n",
+            ui::paint(
+                if repo == "aur" { "35" } else { "34" },
+                &format!("{repo:<16}")
+            ),
+            ui::dim(version),
+            ui::paint("32", &mark)
+        ));
+    }
+    Ok(out)
+}
+
+/// `paru -Ss` (repo and AUR, grouped with descriptions and installed marks), or
+/// `pacman -Ss` without paru. Read-only, so it prints straight to the terminal.
+/// Returns false when nothing matched.
+pub fn search(words: &[String]) -> Result<bool, String> {
+    let program = if in_path("paru") { "paru" } else { "pacman" };
+    let status = Command::new(program)
+        .args(["--color", ui::color_arg(), "-Ss"])
+        .args(words)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("{program} -Ss failed ({status})")),
+    }
+}
+
+/// Unread Arch news (`paru -Pw`: newer than the installed repo packages), which can
+/// announce manual steps an upgrade needs. None when there is none or paru is missing.
+pub fn news() -> Result<Option<String>, String> {
+    if !in_path("paru") {
+        return Ok(None);
+    }
+    let c = capture("paru", &["-Pw"])?;
+    if c.code == 0 && !c.stdout.trim().is_empty() {
+        return Ok(Some(c.stdout));
+    }
+    // Exit 1 with "no new news" on stderr is the normal case.
+    if c.stderr.trim_start().starts_with("error") {
+        ui::warn(&format!(
+            "could not check Arch news: {}",
+            c.stderr.lines().next().unwrap_or("").trim()
+        ));
+    }
+    Ok(None)
+}
+
+/// fzf multi-select over `lines` (package name first on each line); `opts` adds the
+/// prompt, header, preview, query. Returns the chosen names; empty when cancelled.
+pub fn fzf_pick(lines: &str, opts: &[&str]) -> Result<Vec<String>, String> {
+    let mut child = Command::new("fzf")
+        .args([
+            "--multi",
+            "--ansi",
+            "--layout",
+            "reverse",
+            "--preview-window",
+            "right,55%,wrap",
+        ])
+        .args(opts)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run fzf: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A broken pipe only means the user quit before the list was fully read.
+        let _ = stdin.write_all(lines.as_bytes());
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("fzf failed: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_whitespace().next())
+            .map(String::from)
+            .collect()),
+        // 1: no match, 130: Esc or Ctrl-C.
+        Some(1 | 130) => Ok(Vec::new()),
+        _ => Err(format!("fzf failed ({})", out.status)),
+    }
+}
+
 pub fn pacman_running() -> bool {
     Command::new("pgrep")
         .args(["-x", "pacman"])

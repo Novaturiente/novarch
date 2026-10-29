@@ -69,6 +69,11 @@ pub fn state_dir() -> Result<PathBuf, String> {
     Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("novarch"))
 }
 
+/// Package names from the last `search`, one per line (tab completion for `add`).
+pub fn names_cache() -> Result<PathBuf, String> {
+    Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("novarch/packages.txt"))
+}
+
 /// Load config.toml. If the packages folder is unset or unusable, ask for one (terminal
 /// only) until it is usable, then save it.
 pub fn load() -> Result<Config, String> {

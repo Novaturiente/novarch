@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 
 use lists::Declared;
 use plan::{Plan, Set};
@@ -52,7 +53,7 @@ enum Command {
     Upgrade,
     /// Install packages, then add them to a package file.
     Add {
-        #[arg(required = true)]
+        #[arg(required = true, add = ArgValueCandidates::new(known_names))]
         packages: Vec<String>,
         /// Package file to append to, relative to the packages folder
         /// (default: manual-installs.toml).
@@ -62,9 +63,9 @@ enum Command {
         #[arg(long)]
         no_upgrade: bool,
     },
-    /// Remove managed packages from the package files and the system.
+    /// Remove managed packages from the package files and the system (no names: pick with fzf).
     Remove {
-        #[arg(required = true)]
+        #[arg(add = ArgValueCandidates::new(managed_names))]
         packages: Vec<String>,
         /// With --yes, allow removing more than 10 packages.
         #[arg(long)]
@@ -73,22 +74,37 @@ enum Command {
     /// List installed packages no file declares; offer to write them to a new file.
     Status,
     /// Show declared packages, the file that lists each, and install state.
-    List { packages: Vec<String> },
+    List {
+        packages: Vec<String>,
+        /// Only declared packages that are not installed.
+        #[arg(long, conflicts_with = "packages")]
+        missing: bool,
+        /// Only declared packages that are installed but not managed yet.
+        #[arg(long, conflicts_with = "packages")]
+        unmanaged: bool,
+    },
+    /// Search repo and AUR packages (interactive with fzf); offer to add the picks.
+    Search {
+        words: Vec<String>,
+        /// Package file the picks are added to (as for add).
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Print a shell completion script.
     Completions { shell: clap_complete::Shell },
 }
 
 fn main() {
+    // Answers tab-completion requests (COMPLETE=<shell> in the environment) and exits.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     ui::init(&cli.color, cli.verbose);
     let yes = cli.yes;
     if let Command::Completions { shell } = cli.command {
-        clap_complete::generate(
-            shell,
-            &mut Cli::command(),
-            "novarch",
-            &mut std::io::stdout(),
-        );
+        if let Err(e) = completions(shell) {
+            ui::error(&e);
+            std::process::exit(1);
+        }
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -107,7 +123,12 @@ fn main() {
             allow_mass_remove,
         } => remove(packages, yes, allow_mass_remove),
         Command::Status => status(),
-        Command::List { packages } => list(packages),
+        Command::List {
+            packages,
+            missing,
+            unmanaged,
+        } => list(packages, missing, unmanaged),
+        Command::Search { words, to } => search(words, to, yes),
         Command::Completions { .. } => unreachable!("handled above"),
     };
     if let Err(e) = result {
@@ -120,6 +141,69 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// The shell's registration script: on Tab it calls `COMPLETE=<shell> novarch`, so package
+/// names come from the cache and state files at completion time.
+fn completions(shell: clap_complete::Shell) -> Result<(), String> {
+    let shells = clap_complete::env::Shells::builtins();
+    let completer = shells
+        .completer(&shell.to_string())
+        .ok_or(format!("no completion support for {shell}"))?;
+    let mut out = std::io::stdout();
+    completer
+        .write_registration("COMPLETE", "novarch", "novarch", "novarch", &mut out)
+        .map_err(|e| e.to_string())?;
+    if shell == clap_complete::Shell::Zsh {
+        // Installed as an autoloaded _novarch, the first Tab only defines the function.
+        println!("[[ $funcstack[1] == _novarch ]] && _clap_dynamic_completer_novarch \"$@\"");
+    }
+    Ok(())
+}
+
+/// `add` completion: names saved by the last `search`, else the sync repos.
+fn known_names() -> Vec<CompletionCandidate> {
+    let cached = config::names_cache()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok());
+    let names: Vec<String> = match cached {
+        Some(text) => text.lines().map(String::from).collect(),
+        None => system::sync_packages()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    };
+    names.into_iter().map(CompletionCandidate::new).collect()
+}
+
+/// `remove` completion: what managed.json records.
+fn managed_names() -> Vec<CompletionCandidate> {
+    state::load()
+        .unwrap_or_default()
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
+/// fzf can run: it is installed and both ends are a terminal.
+fn can_pick() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && system::in_path("fzf")
+}
+
+/// Show unread Arch news before anything changes (it can announce manual steps an
+/// upgrade needs). Asks to continue unless a Proceed prompt follows anyway.
+fn check_news(proceed_follows: bool) -> Result<bool, String> {
+    let Some(text) = system::news()? else {
+        return Ok(true);
+    };
+    ui::warn("Unread Arch Linux news; read it before upgrading, it may need manual steps:");
+    for line in text.lines() {
+        ui::detail(line);
+    }
+    if proceed_follows {
+        return Ok(true);
+    }
+    ui::confirm("Continue after reading the news?", true)
 }
 
 /// Add a next-step hint to an error (novarch sees exit codes only, not pacman's output).
@@ -372,7 +456,7 @@ fn sync(yes: bool, allow_mass_remove: bool) -> Result<(), String> {
     let p = w.plan();
     show_plan(&w, &p);
     check_mass(p.remove.len(), yes, allow_mass_remove)?;
-    if !yes && !ui::confirm("Proceed?", true)? {
+    if !check_news(!yes)? || (!yes && !ui::confirm("Proceed?", true)?) {
         ui::warn("Nothing changed");
         return Ok(());
     }
@@ -580,6 +664,10 @@ fn upgrade(yes: bool) -> Result<(), String> {
     let start = Instant::now();
     let _lock = preflight()?;
     let cfg = config::load()?;
+    if !check_news(false)? {
+        ui::warn("Nothing changed");
+        return Ok(());
+    }
     ui::set_steps(3);
     prepare(&cfg, yes)?;
     ui::step("Upgrading the system");
@@ -637,7 +725,7 @@ fn add(names: Vec<String>, to: Option<String>, no_upgrade: bool, yes: bool) -> R
             ui::dim(&format!("-> {}", rel.display()))
         ));
     }
-    if !yes && !ui::confirm("Proceed?", true)? {
+    if (!no_upgrade && !check_news(!yes)?) || (!yes && !ui::confirm("Proceed?", true)?) {
         ui::warn("Nothing changed");
         return Ok(());
     }
@@ -697,6 +785,14 @@ fn remove(names: Vec<String>, yes: bool, allow_mass_remove: bool) -> Result<(), 
     let _lock = preflight()?;
     let cfg = config::load()?;
     let w = World::look(&cfg)?;
+    let names = if names.is_empty() {
+        pick_managed(&w)?
+    } else {
+        names
+    };
+    if names.is_empty() {
+        return Ok(());
+    }
     let mut targets = Set::new();
     for n in &names {
         let real = if w.managed.contains(n) {
@@ -765,6 +861,39 @@ fn remove(names: Vec<String>, yes: bool, allow_mass_remove: bool) -> Result<(), 
     Ok(())
 }
 
+/// fzf over managed packages, by the name the package files use (`sh`, not `bash`).
+fn pick_managed(w: &World) -> Result<Vec<String>, String> {
+    if !can_pick() {
+        return Err("name the packages to remove (picking from a list needs fzf)".into());
+    }
+    let mut rows: BTreeMap<&str, String> = BTreeMap::new();
+    for (declared, real) in &w.real {
+        if w.managed.contains(real) {
+            rows.insert(declared, w.files(declared));
+        }
+    }
+    for m in &w.managed {
+        if !w.real.values().any(|r| r == m) {
+            rows.insert(m, "not in any file".into());
+        }
+    }
+    let lines: String = rows
+        .iter()
+        .map(|(n, f)| format!("{n:<36} {}\n", ui::dim(f)))
+        .collect();
+    system::fzf_pick(
+        &lines,
+        &[
+            "--prompt",
+            "remove> ",
+            "--header",
+            "Tab: mark several  Enter: remove marked (asks first)  Esc: quit",
+            "--preview",
+            "pacman -Qi --color always {1}",
+        ],
+    )
+}
+
 fn status() -> Result<(), String> {
     let cfg = config::load()?;
     let w = World::look(&cfg)?;
@@ -790,17 +919,53 @@ fn status() -> Result<(), String> {
         };
         ui::detail(&format!("{n}  {}", ui::dim(src)));
     }
-    if !std::io::stdin().is_terminal()
-        || !ui::confirm(
-            "Write them to a new package file so novarch manages them?",
-            true,
-        )?
-    {
+    if !std::io::stdin().is_terminal() {
         return Ok(());
     }
-    let name = ui::input("File name inside the packages folder", "preinstalled.toml")?;
+    let chosen: Set = if can_pick() {
+        let lines: String = unlisted
+            .iter()
+            .map(|n| {
+                let src = if foreign.contains(n) {
+                    "AUR / foreign"
+                } else {
+                    "repo"
+                };
+                format!("{n:<36} {}\n", ui::dim(src))
+            })
+            .collect();
+        system::fzf_pick(
+            &lines,
+            &[
+                "--prompt",
+                "import> ",
+                "--header",
+                "All marked. Tab: unmark  Enter: write marked to a new package file  Esc: cancel",
+                "--bind",
+                "load:select-all",
+                "--preview",
+                "pacman -Qi --color always {1}",
+            ],
+        )?
+        .into_iter()
+        .collect()
+    } else if ui::confirm(
+        "Write them to a new package file so novarch manages them?",
+        true,
+    )? {
+        unlisted
+    } else {
+        Set::new()
+    };
+    if chosen.is_empty() {
+        return Ok(());
+    }
+    let name = ui::input(
+        &format!("File name inside the packages folder for {}", chosen.len()),
+        "preinstalled.toml",
+    )?;
     let rel = target_file(Some(&name))?;
-    lists::write_import(&cfg.packages_dir.join(&rel), &unlisted, &foreign)?;
+    lists::write_import(&cfg.packages_dir.join(&rel), &chosen, &foreign)?;
     ui::ok(&format!(
         "wrote {}; run novarch sync to adopt them (nothing is downloaded)",
         rel.display()
@@ -808,11 +973,20 @@ fn status() -> Result<(), String> {
     Ok(())
 }
 
-fn list(names: Vec<String>) -> Result<(), String> {
+fn list(names: Vec<String>, missing: bool, unmanaged: bool) -> Result<(), String> {
     let cfg = config::load()?;
     let w = World::look(&cfg)?;
-    let rows: Vec<String> = if names.is_empty() {
-        w.names.iter().cloned().collect()
+    let all = names.is_empty();
+    let rows: Vec<String> = if all {
+        w.names
+            .iter()
+            .filter(|n| {
+                let is_missing = w.unsatisfied.contains(*n);
+                let is_unmanaged = w.real.get(*n).is_some_and(|r| !w.managed.contains(r));
+                (!missing && !unmanaged) || (missing && is_missing) || (unmanaged && is_unmanaged)
+            })
+            .cloned()
+            .collect()
     } else {
         names
     };
@@ -856,12 +1030,74 @@ fn list(names: Vec<String>) -> Result<(), String> {
         };
         ui::detail(&line);
     }
-    if names_were_all(&rows, &w) {
+    if all && (missing || unmanaged) {
+        ui::ok(&format!(
+            "{} of {} declared packages",
+            rows.len(),
+            w.names.len()
+        ));
+    } else if all {
         ui::ok(&format!("{} packages declared", rows.len()));
     }
     Ok(())
 }
 
-fn names_were_all(rows: &[String], w: &World) -> bool {
-    rows.len() == w.names.len() && rows.iter().all(|r| w.names.contains(r))
+/// fzf over every repo and AUR package when there is a terminal; otherwise `-Ss` output.
+fn search(words: Vec<String>, to: Option<String>, yes: bool) -> Result<(), String> {
+    let rel = target_file(to.as_deref())?;
+    if !can_pick() {
+        if words.is_empty() {
+            return Err("give a search term, e.g. novarch search firefox\n(interactive search needs fzf and a terminal)".into());
+        }
+        if !system::search(&words)? {
+            ui::warn("no packages match");
+        }
+        return Ok(());
+    }
+    if !system::in_path("paru")
+        && ui::confirm(
+            "paru is not installed, so AUR packages are missing. Set up Chaotic-AUR and paru now (runs novarch upgrade: a full system upgrade)?",
+            true,
+        )?
+    {
+        upgrade(yes)?;
+    }
+    ui::phase("Loading the repo and AUR package lists");
+    let index = system::package_index()?;
+    let names: Set = index
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(String::from)
+        .collect();
+    let text: String = names.iter().map(|n| format!("{n}\n")).collect();
+    if let Err(e) = config::names_cache().and_then(|p| config::write_atomic(&p, &text)) {
+        ui::warn(&format!(
+            "cannot save package names for tab completion: {e}"
+        ));
+    }
+    let header = format!(
+        "Tab: mark several  Enter: add marked to {}  Esc: quit",
+        rel.display()
+    );
+    let preview = "pacman -Si --color always {2}/{1} 2>/dev/null || paru -Si --color always {1}";
+    let query = words.join(" ");
+    let mut opts = vec![
+        "--no-sort",
+        "--prompt",
+        "package> ",
+        "--header",
+        header.as_str(),
+        "--preview",
+        preview,
+    ];
+    // Only when given, so FZF_DEFAULT_OPTS=--filter=... can drive it in tests.
+    if !query.is_empty() {
+        opts.extend(["--query", query.as_str()]);
+    }
+    let picked = system::fzf_pick(&index, &opts)?;
+    if picked.is_empty() {
+        return Ok(());
+    }
+    // add drops duplicates (a name in two repos), shows the plan and asks first.
+    add(picked, to, false, yes)
 }

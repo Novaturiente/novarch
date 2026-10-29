@@ -26,6 +26,10 @@ installed with `install.sh` (curl). Next: AUR `PKGBUILD` (needs an AUR account).
   each: `docs/design.md` section 7. Add a crate only when its milestone needs it.
 - No runtime dependency besides glibc: releases are a single binary (GitHub Releases +
   curl `install.sh`, later AUR). Chosen over Python because Arch `base` has no Python.
+  `fzf` is optional: `search`, `status` and name-less `remove` use it; without it they
+  fall back to plain output / prompts. Completions use clap_complete's `unstable-dynamic`
+  feature (no stability promise across clap_complete updates: retest completions after
+  bumping it).
 - Build/run: `cargo build`, `cargo run -- <command>`.
 
 ## Decisions (do not re-litigate without the user)
@@ -70,6 +74,8 @@ installed with `install.sh` (curl). Next: AUR `PKGBUILD` (needs an AUR account).
 - Source builds (target in no sync repo) add `base-devel` to the same `paru -Su`
   transaction if missing; paru alone cannot build without it.
 - `add` installs first, then writes the TOML file.
+- The Arch news check (`paru -Pw`) and its prompt run before the keyring `-Sy`, never
+  after: declining after `-Sy` would leave a synced database without `-u`.
 
 ## Testing
 

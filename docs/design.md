@@ -108,10 +108,11 @@ packages = [
 | `novarch diff` | Dry run. Prints `to_install`, `to_adopt`, `to_remove`. Changes nothing. |
 | `novarch upgrade` | Keyring refresh + `paru -Syu`. Does not touch the lists. |
 | `novarch add PKG... [--to FILE] [--no-upgrade]` | Installs the packages, then appends them to `manual-installs.toml` (or `FILE`, relative to `packages_dir`, e.g. `hosts/laptop/dev.toml`) and marks them managed. `--no-upgrade` is the emergency path (section 4.7). |
-| `novarch remove PKG...` | Deletes the names from whichever package files contain them, then runs the removal path for them. Refuses packages that are not managed. |
+| `novarch remove [PKG...]` | Deletes the names from whichever package files contain them, then runs the removal path for them. Refuses packages that are not managed. Without names: fzf multi-select over managed packages (by declared name), then the same flow. |
 | `novarch status` | Lists explicitly installed packages that no file declares, then offers to write them to a new file so novarch manages them (section 4.9). |
-| `novarch list [PKG...]` | Each declared package, the file(s) that declare it, and whether it is installed and managed. With names: only those, plus "not declared" or "dependency of X" (`pacman -Qi` Required By) for names no file lists. |
-| `novarch completions bash\|zsh\|fish` | Prints a shell completion script. |
+| `novarch list [PKG...] [--missing] [--unmanaged]` | Each declared package, the file(s) that declare it, and whether it is installed and managed. With names: only those, plus "not declared" or "dependency of X" (`pacman -Qi` Required By) for names no file lists. The flags keep only declared packages that are not installed / installed but not managed yet. |
+| `novarch search [WORDS...] [--to FILE]` | With fzf and a terminal: fuzzy multi-select over every sync-repo package (`pacman -Sl`) and AUR name (`paru -Sl aur`), preview from `pacman -Si`/`paru -Si`. Without paru it first offers `novarch upgrade` (Chaotic-AUR question, paru bootstrap; paru only comes in a full upgrade), else shows repo packages only. Each run saves all names for `add` tab completion. The picks go through `add` (its plan and Proceed prompt, `--to` passed on). Without fzf or a terminal: needs WORDS and prints `paru -Ss` (or `pacman -Ss`) output. fzf is optional, never required. |
+| `novarch completions bash\|zsh\|fish` | Prints a shell completion script. It calls back into novarch on Tab (`COMPLETE=<shell> novarch`, clap_complete `unstable-dynamic`): `add` completes names from the last `search` (`$XDG_CACHE_HOME/novarch/packages.txt`) or `pacman -Slq` without one, `remove` completes `managed.json`. |
 
 Global flags: `--yes` (passes `--noconfirm`), `--verbose`. `sync` and `remove` also take
 `--allow-mass-remove` (section 4.6).
@@ -205,6 +206,12 @@ build packages that are in no sync repo and `base-devel` is not installed, it is
 to the same `paru -Su` transaction.
 
 ### 4.4 Keyring refresh
+
+First, before anything changes and before the `-Sy` (declining after it would leave
+synced databases without `-u`): `paru -Pw` prints unread Arch news (newer than the
+installed repo packages), which can announce manual steps. sync and add show it before
+their Proceed prompt; upgrade, and sync/add with `--yes`, ask `Continue after reading
+the news?` (asked even with `--yes`). No paru or no network: skipped (warned).
 
 Before any upgrade:
 
@@ -326,6 +333,8 @@ repo (`pacman -Qqen`) and foreign/AUR (`pacman -Qqem`). Then ask for a file name
 (default `preinstalled.toml`) and write them there, sorted, with `# repo` and
 `# AUR / foreign` comments. The file must not already exist. The next `sync` adopts them
 (they are installed, so nothing is downloaded). Answering no writes nothing.
+With fzf (and a terminal) the yes/no question is an fzf list with every package marked;
+unmark the ones to leave out, Esc writes nothing.
 
 ### 4.10 Concurrency and state backups
 

@@ -103,6 +103,31 @@ exec 9>&-
 LAST=$(sudo -n novarch sync 2>&1 </dev/null)
 check "root refuses" 'said "do not run novarch as root"'
 
+echo "--- list filters (before any sync: tree missing, jq installed but not managed)"
+nv "" list --missing
+check "list --missing" '[ $RC -eq 0 ] && said "tree" && ! said "jq "'
+nv "" list --unmanaged
+check "list --unmanaged" '[ $RC -eq 0 ] && said "jq" && said "not managed yet" && ! said "tree"'
+
+echo "--- search without fzf and paru"
+nv "" search
+check "search without fzf needs words" '[ $RC -ne 0 ] && said "give a search term"'
+nv "" search figlet
+check "search falls back to pacman -Ss" '[ $RC -eq 0 ] && said "extra/figlet"'
+sudo pacman -S --noconfirm fzf >/dev/null
+# fzf in filter mode prints the matching lines and exits: no keys needed. --nth 1 with a
+# one-space delimiter makes "^name$" match the name column exactly. Nothing matches here.
+pick() { export FZF_DEFAULT_OPTS="--exact --nth 1 --delimiter ' ' --filter '^$1\$'"; }
+pick zzz-no-match
+nv "n" search
+check "search offers paru setup; no = repo only" '[ $RC -eq 0 ] && said "paru is not installed" && said "repo packages only"'
+nv "y" search --yes
+check "search sets up paru (novarch upgrade) on yes" '[ $RC -eq 0 ] && paru --version >/dev/null 2>&1 && said "upgrade finished"'
+check "search saved names incl. AUR for completion" 'grep -qx "$AUR" "$HOME/.cache/novarch/packages.txt"'
+unset FZF_DEFAULT_OPTS
+LAST=$(_CLAP_COMPLETE_INDEX=2 COMPLETE=bash novarch -- novarch add "${AUR:0:12}" 2>&1)
+check "add completes AUR names from the cache" 'said "$AUR"'
+
 echo "--- first sync: bootstrap, install, adopt"
 nv "n" sync --yes
 check "sync exit 0" '[ $RC -eq 0 ]'
@@ -167,6 +192,15 @@ nv "" add --yes --no-upgrade --to hosts/test/extra.toml ed
 check "add --no-upgrade into a host file" '[ $RC -eq 0 ] && installed ed && grep -q "\"ed\"" "$PK/hosts/test/extra.toml"'
 nv "" add --yes -- "'--overwrite=*'"
 check "option-like name refused" 'said "invalid package name"'
+pick fortune-mod
+# A shared file: hosts/test/ is not this container's host folder, so remove would not see it.
+nv "" search --yes --to search.toml
+check "search pick goes through add --to" '[ $RC -eq 0 ] && installed fortune-mod && grep -q "\"fortune-mod\"" "$PK/search.toml" && managed fortune-mod'
+LAST=$(_CLAP_COMPLETE_INDEX=2 COMPLETE=bash novarch -- novarch remove fortune 2>&1)
+check "remove completes managed names" 'said "fortune-mod"'
+nv "" remove --yes
+check "remove without names picks with fzf" '[ $RC -eq 0 ] && ! installed fortune-mod && ! grep -q "fortune-mod" "$PK/search.toml" && ! managed fortune-mod'
+unset FZF_DEFAULT_OPTS
 
 echo "--- remove"
 nv "" remove --yes bc
@@ -175,8 +209,10 @@ nv "" remove --yes bash-completion
 check "remove refuses unmanaged" 'said "not managed by novarch"'
 
 echo "--- status, list, corrupt state, upgrade"
-nv "y|<enter>" status
-check "status writes preinstalled.toml" 'grep -q "\"base\"" "$PK/preinstalled.toml"'
+pick base
+nv "<enter>" status
+unset FZF_DEFAULT_OPTS
+check "status writes only the fzf picks" 'grep -q "\"base\"" "$PK/preinstalled.toml" && ! grep -q "\"fzf\"" "$PK/preinstalled.toml" && [ "$(grep -c "^  \"" "$PK/preinstalled.toml")" -eq 1 ]'
 rm "$PK/preinstalled.toml"
 nv "" list sh "$AUR" zzz
 check "list shows provides and unknowns" 'said "(as bash)" && said "not installed, not declared"'
@@ -187,6 +223,14 @@ check "corrupt managed.json stops the run" '[ $RC -ne 0 ] && said "is corrupt"'
 cp /tmp/m.json "$STATE/managed.json"
 nv "" upgrade --yes
 check "upgrade" '[ $RC -eq 0 ] && said "upgrade finished"'
+# Fake unread news: a paru in /usr/local/bin that answers -Pw itself.
+printf '#!/bin/sh\n[ "$1" = -Pw ] && { echo "2099-01-01 Test news: manual steps needed"; exit 0; }\nexec /usr/bin/paru "$@"\n' | sudo tee /usr/local/bin/paru >/dev/null
+sudo chmod +x /usr/local/bin/paru
+nv "n" upgrade --yes
+check "news shown and asked even with --yes; no stops" '[ $RC -eq 0 ] && said "Test news" && said "Nothing changed" && ! said "Refreshing keyrings"'
+nv "n" sync
+check "sync shows news before Proceed" '[ $RC -eq 0 ] && said "Test news" && said "Nothing changed"'
+sudo rm /usr/local/bin/paru
 check "log written" 'grep -q "exec: sudo pacman" "$STATE/novarch.log"'
 
 echo "--- result ($MODE): $pass passed, $fail failed"
